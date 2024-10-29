@@ -22,12 +22,6 @@ print_row() {
     printf "%-110s | %-12s | %-25s | %-10s\n" "$gpu_name" "$pci_id" "$action" "$status"
 }
 
-# Function to list all detected GPUs
-list_all_gpus() {
-    echo -e "${BLUE}Listing all detected GPUs:${NC}"
-    lspci | grep "VGA compatible controller" | nl -v 0
-}
-
 # Function to extract AMD GPUs and their PCI addresses
 get_amd_gpus() {
     local amd_gpus=()
@@ -57,7 +51,7 @@ apply_amd_oc() {
     case "$mode" in
         "energy")
             action="amd-oc energy-saving"
-            if amd-oc --bus "$pci_id" --core-clock 700 --mem-clock 550 --soc-clock 600 --vdd 650 --mvdd 800 --fan 35 --pl 65 &>/dev/null; then
+            if amd-oc --bus "$pci_id" --core-clock 300 --mem-clock 300 --soc-clock 300 --vdd 600 --mvdd 700 --fan 20 --pl 30 &>/dev/null; then
                 status="${GREEN}Applied${NC}"
             else
                 status="${RED}Failed${NC}"
@@ -80,6 +74,12 @@ apply_amd_oc() {
             else
                 status="${RED}Failed${NC}"
             fi
+            print_row "$gpu_info" "$pci_id" "$action" "$status"
+            ;;
+        "remove"|"rescan")
+            action="amd-oc $mode"
+            # Skip amd-oc settings when removing or rescanning
+            status="${YELLOW}Skipped${NC}"
             print_row "$gpu_info" "$pci_id" "$action" "$status"
             ;;
     esac
@@ -117,6 +117,10 @@ apply_device_settings() {
                         echo "auto" > "$device/power_dpm_force_performance_level" 2>/dev/null
                         status="${GREEN}Applied${NC}"
                         ;;
+                    "remove"|"rescan")
+                        action="power_dpm $mode"
+                        status="${YELLOW}Skipped${NC}"
+                        ;;
                 esac
             else
                 action="power_dpm $mode"
@@ -127,27 +131,67 @@ apply_device_settings() {
     fi
 }
 
+# Function to remove the GPU from the system
+remove_gpu() {
+    local pci_id=$1
+    local gpu_info
+    local action="remove GPU"
+    gpu_info=$(lspci -s "$pci_id" | grep "VGA compatible controller" | cut -d ' ' -f 5-)
+
+    if [ -w "/sys/bus/pci/devices/0000:${pci_id}/remove" ]; then
+        echo "1" > "/sys/bus/pci/devices/0000:${pci_id}/remove" 2>/dev/null
+        status="${GREEN}Removed${NC}"
+    else
+        status="${RED}Failed${NC} (Permission denied)"
+    fi
+    print_row "$gpu_info" "$pci_id" "$action" "$status"
+}
+
+# Function to rescan the PCI bus
+rescan_pci_bus() {
+    local action="PCI Bus Rescan"
+    if [ -w "/sys/bus/pci/rescan" ]; then
+        echo "1" > /sys/bus/pci/rescan
+        status="${GREEN}Rescanned${NC}"
+    else
+        status="${RED}Failed${NC} (Permission denied)"
+    fi
+    # Since rescanning affects the whole bus, we can print a single line
+    printf "%-110s | %-12s | %-25s | %-10s\n" "-" "-" "$action" "$status"
+}
+
 # Main unified function to apply all settings for each card
 apply_settings() {
     local mode=$1
 
-    # Retrieve AMD GPUs
-    local amd_gpus=($(get_amd_gpus))
-    echo -e "${YELLOW}Detected ${#amd_gpus[@]} AMD GPU(s).${NC}"
+    if [[ "$mode" == "rescan" ]]; then
+        # Rescan the PCI bus
+        print_header
+        rescan_pci_bus
+        echo -e "${GREEN}PCI bus rescan completed.${NC}"
+    else
+        # Retrieve AMD GPUs
+        local amd_gpus=($(get_amd_gpus))
+        echo -e "${YELLOW}Detected ${#amd_gpus[@]} AMD GPU(s).${NC}"
 
-    # Print table header
-    print_header
+        # Print table header
+        print_header
 
-    # Assign a simple sequential index (starting from 0) to each card
-    local index=0
-    for pci_id in "${amd_gpus[@]}"; do
-        # Apply settings for each card
-        apply_amd_oc "$pci_id" "$mode"
-        apply_device_settings "$index" "$mode" "$pci_id"
-        index=$((index + 1))  # Increment index for each card
-    done
+        # Assign a simple sequential index (starting from 0) to each card
+        local index=0
+        for pci_id in "${amd_gpus[@]}"; do
+            # Apply settings for each card
+            if [[ "$mode" == "remove" ]]; then
+                remove_gpu "$pci_id"
+            else
+                apply_amd_oc "$pci_id" "$mode"
+                apply_device_settings "$index" "$mode" "$pci_id"
+            fi
+            index=$((index + 1))  # Increment index for each card
+        done
 
-    echo -e "${GREEN}All settings applied to ${#amd_gpus[@]} GPU(s).${NC}"
+        echo -e "${GREEN}All settings applied to ${#amd_gpus[@]} GPU(s).${NC}"
+    fi
 }
 
 # Main script logic
@@ -164,8 +208,16 @@ case "$1" in
         echo -e "${YELLOW}Reverting settings to default...${NC}"
         apply_settings "default"
         ;;
+    "remove")
+        echo -e "${YELLOW}Removing GPUs from the system...${NC}"
+        apply_settings "remove"
+        ;;
+    "rescan")
+        echo -e "${YELLOW}Rescanning the PCI bus...${NC}"
+        apply_settings "rescan"
+        ;;
     *)
-        echo -e "${RED}Usage: $0 [energy|performance|default]${NC}"
+        echo -e "${RED}Usage: $0 [energy|performance|default|remove|rescan]${NC}"
         exit 1
         ;;
 esac
